@@ -14,6 +14,34 @@ WiFiServer server(502);
 // RS485 is half duplex and requires manual switch between transfer directions
 uint8_t dirPin = 12;
 
+enum DebugLevel
+{
+    Normal,
+    Verbose,
+    Debug
+};
+
+DebugLevel debugLevel = Verbose;
+
+template<class T>
+void debugPrint(DebugLevel level, T msg)
+{
+    if(debugLevel >= level)
+        DebugSerial.print(msg);
+}
+
+template<class T>
+void debugPrintLn(DebugLevel level, T msg)
+{
+    if(debugLevel >= level)
+        DebugSerial.println(msg);
+}
+
+uint16_t bytesToU16(const uint8_t * buf)
+{
+    return (buf[0] << 8) + buf[1];
+}
+
 // Calculate CRC16 is required by Modbus RTU
 uint16_t crc16(const uint8_t * buf, size_t len)
 {
@@ -42,6 +70,11 @@ uint16_t crc16(const uint8_t * buf, size_t len)
 
 void dumpBuf(const char * label, const uint8_t * buf, size_t len)
 {
+    // No need to spam the console unless we are debugging
+    if(debugLevel < Debug)
+      return;
+
+    // Print the packet
     DebugSerial.print(label);
     DebugSerial.print(": ");
     for(size_t i=0; i<len; i++)
@@ -80,8 +113,9 @@ size_t receiveRS485Response(uint8_t * buf)
     size_t rcvd = Serial.readBytes(buf, 3); // Receive the header - 3rd byte contains lengh of the payload
     if(rcvd != 3)
     {
-        DebugSerial.print("Invalid RS485 response header length ");
-        DebugSerial.println(rcvd);
+        debugPrintLn(Normal, "Timeout");
+        debugPrint(Verbose, "Invalid RS485 response header length ");
+        debugPrintLn(Verbose, rcvd);
 
         // Fill the exception code
         // buf[0] = ... // Hopefully function code byte is still there
@@ -153,10 +187,10 @@ bool connectToWiFi()
         return true;
     
     // Connect to WiFi network
-    DebugSerial.println();
-    DebugSerial.println();
-    DebugSerial.print("Connecting to ");
-    DebugSerial.println(ssid);
+    debugPrintLn(Normal, "");
+    debugPrintLn(Normal, "");
+    debugPrint(Normal, "Connecting to ");
+    debugPrint(Normal, ssid);
   
     WiFi.begin(ssid, password);
     for(size_t i=0; i<connectionAttempts; i++)
@@ -164,14 +198,14 @@ bool connectToWiFi()
         delay(100);
         if(WiFi.status() == WL_CONNECTED)
         {
-            DebugSerial.println("");
-            DebugSerial.println("WiFi connected");
-            DebugSerial.println(WiFi.localIP());
+            debugPrintLn(Normal, "");
+            debugPrintLn(Normal, "WiFi connected");
+            debugPrintLn(Normal, WiFi.localIP());
 
             return true;
         }
 
-        DebugSerial.print(".");
+        debugPrint(Normal, ".");
     }
 
     return false;
@@ -209,7 +243,7 @@ void setup()
     buf[9] = fbuf[1];
     buf[10] = fbuf[0];
     
-    DebugSerial.println("Setting up counter ID");
+    debugPrintLn(Normal, "Setting up counter ID");
     size_t responseSize = processModbusRTURequest(buf, 11);
     dumpBuf("Response", buf, responseSize);
 
@@ -224,7 +258,7 @@ bool receiveTCPData(WiFiClient & client, uint8_t * buf, size_t len)
     {
         if(!client.connected())
         {
-          DebugSerial.println("receiveTCPData - not connected");
+          debugPrintLn(Verbose, "receiveTCPData - not connected");
           return false;
         }
       
@@ -245,25 +279,38 @@ bool processTCPRequest(WiFiClient & client)
     uint8_t buf[300];
 
     // Waiting for MBAP (Message header)
-    DebugSerial.println("Waiting for MBAP");
+    debugPrintLn(Debug, "Waiting for MBAP");
     if(!receiveTCPData(client, buf, MBAPSize))
     {
-        DebugSerial.println("Waiting MBAP failed");
+        debugPrintLn(Debug, "Waiting MBAP failed");
         return false;
     }
 
     dumpBuf("MBAP", buf, MBAPSize);
-    uint16_t packetSize = (buf[4] << 8) + buf[5] - 1; // Size includes the last byte of MBAP - do not count it
+    uint16_t packetSize = bytesToU16(buf + 4) - 1; // Size includes the last byte of MBAP - do not count it
 
-    DebugSerial.print("Packet size:");
-    DebugSerial.println(packetSize);
+    debugPrint(Debug, "Packet size:");
+    debugPrintLn(Debug, packetSize);
     
     if(!receiveTCPData(client, buf + MBAPSize, packetSize))
         return false;
 
+    debugPrint(Verbose, "Request: transaction ");
+    debugPrint(Verbose, bytesToU16(buf));
+    debugPrint(Verbose, " unit ");
+    debugPrint(Verbose, buf[6]);
+    debugPrint(Verbose, " function ");
+    debugPrint(Verbose, buf[7]);
+    debugPrint(Verbose, " register ");
+    debugPrint(Verbose, bytesToU16(buf + 8));
+    debugPrint(Verbose, " count ");
+    debugPrint(Verbose, bytesToU16(buf + 10));
+    debugPrint(Verbose, ": ");
+
+
     dumpBuf("Pscket", buf, MBAPSize + packetSize);
 
-    DebugSerial.println("Processing the request");
+    debugPrintLn(Debug, "Processing the request");
     size_t responseSize = processModbusRTURequest(buf + MBAPSize - 1, packetSize + 1);
 
     // Store response size in MBAP
@@ -273,8 +320,10 @@ bool processTCPRequest(WiFiClient & client)
     dumpBuf("Response", buf, responseSize + MBAPSize - 1);
     client.write((const uint8_t *)buf, responseSize + MBAPSize - 1);
 
-    DebugSerial.println("Request processed");
-    DebugSerial.println();
+    if(responseSize > 3)
+      debugPrintLn(Verbose, "OK");
+    debugPrintLn(Debug, "Request processed");
+    debugPrintLn(Debug, "");
 
     return true;
 }
